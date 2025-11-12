@@ -194,40 +194,61 @@ echo -e "${CYAN}📝 Creating KIND config...${RESET}"
 mkdir -p /tmp/localstack-s3 || echo -e "${YELLOW}⚠️  Could not create /tmp/localstack-s3 (may need sudo)${RESET}"
 
 # Create full cluster configuration with all required nodes
-cat > $KIND_CONFIG <<EOF
+cat > $KIND_CONFIG <<'EOF'
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
-name: $CLUSTER_NAME
+name: osmo
 nodes:
-- role: control-plane
-- role: worker
-  extraPortMappings:
-  - containerPort: 30080
-    hostPort: 80
-    protocol: TCP
-  kubeadmConfigPatches:
-  - |
-    kind: JoinConfiguration
-    nodeRegistration:
-      kubeletExtraArgs:
-        node-labels: "node_group=ingress,nvidia.com/gpu.deploy.operands=false"
-- role: worker
-  kubeadmConfigPatches:
-  - |
-    kind: JoinConfiguration
-    nodeRegistration:
-      kubeletExtraArgs:
-        node-labels: "node_group=kai-scheduler,nvidia.com/gpu.deploy.operands=false"
-- role: worker
-  extraMounts:
-  - hostPath: /dev/null
-    containerPath: /var/run/nvidia-container-devices/all
-  kubeadmConfigPatches:
-  - |
-    kind: JoinConfiguration
-    nodeRegistration:
-      kubeletExtraArgs:
-        node-labels: "node_group=compute"
+  - role: control-plane
+  - role: worker
+    kubeadmConfigPatches:
+    - |
+      kind: JoinConfiguration
+      nodeRegistration:
+        kubeletExtraArgs:
+          node-labels: "node_group=ingress,nvidia.com/gpu.deploy.operands=false"
+    extraPortMappings:
+      - containerPort: 30080
+        hostPort: 80
+        protocol: TCP
+  - role: worker
+    kubeadmConfigPatches:
+    - |
+      kind: JoinConfiguration
+      nodeRegistration:
+        kubeletExtraArgs:
+          node-labels: "node_group=kai-scheduler,nvidia.com/gpu.deploy.operands=false"
+  - role: worker
+    kubeadmConfigPatches:
+    - |
+      kind: JoinConfiguration
+      nodeRegistration:
+        kubeletExtraArgs:
+          node-labels: "node_group=data,nvidia.com/gpu.deploy.operands=false"
+    extraMounts:
+      - hostPath: /tmp/localstack-s3
+        containerPath: /var/lib/localstack
+  - role: worker
+    kubeadmConfigPatches:
+    - |
+      kind: JoinConfiguration
+      nodeRegistration:
+        kubeletExtraArgs:
+          node-labels: "node_group=service,nvidia.com/gpu.deploy.operands=false"
+  - role: worker
+    kubeadmConfigPatches:
+    - |
+      kind: JoinConfiguration
+      nodeRegistration:
+        kubeletExtraArgs:
+          node-labels: "node_group=service,nvidia.com/gpu.deploy.operands=false"
+  - role: worker
+    kubeadmConfigPatches:
+    - |
+      kind: JoinConfiguration
+      nodeRegistration:
+        kubeletExtraArgs:
+          node-labels: "node_group=compute"
 EOF
 
 echo -e "${CYAN}🚀 Creating KIND cluster...${RESET}"
@@ -317,9 +338,21 @@ nodes:
 - role: worker
 - role: worker
 - role: worker
+- role: worker
+- role: worker
+- role: worker
 EOF
     if kind create cluster --config=/tmp/kind-minimal-config.yaml 2>&1 | tee /tmp/kind-create.log; then
       CLUSTER_CREATED=true
+      # Label nodes for fallback cluster
+      sleep 10
+      WORKERS=($(kubectl get nodes --no-headers | grep -v control-plane | awk '{print $1}'))
+      [ ${#WORKERS[@]} -ge 1 ] && kubectl label node ${WORKERS[0]} node_group=ingress --overwrite 2>/dev/null || true
+      [ ${#WORKERS[@]} -ge 2 ] && kubectl label node ${WORKERS[1]} node_group=kai-scheduler --overwrite 2>/dev/null || true
+      [ ${#WORKERS[@]} -ge 3 ] && kubectl label node ${WORKERS[2]} node_group=data --overwrite 2>/dev/null || true
+      [ ${#WORKERS[@]} -ge 4 ] && kubectl label node ${WORKERS[3]} node_group=service --overwrite 2>/dev/null || true
+      [ ${#WORKERS[@]} -ge 5 ] && kubectl label node ${WORKERS[4]} node_group=service --overwrite 2>/dev/null || true
+      [ ${#WORKERS[@]} -ge 6 ] && kubectl label node ${WORKERS[5]} node_group=compute --overwrite 2>/dev/null || true
       echo -e "${YELLOW}⚠️  Created cluster with regular kind (minimal config). Some features may be limited.${RESET}"
       break
     fi
@@ -381,16 +414,16 @@ echo -e "${CYAN}▶ Installing OSMO...${RESET}"
 if [ ! -f "quick-start-1.0.0.tgz" ]; then
   echo -e "${CYAN}Downloading OSMO chart...${RESET}"
   if [ -n "$NGC_API_KEY" ]; then
-    # Authenticated pull via NGC repo if API key provided
-    helm repo add nvidian https://helm.ngc.nvidia.com/nvidian/charts --username '$oauthtoken' --password "$NGC_API_KEY" >/dev/null 2>&1 || true
-    helm repo update >/dev/null 2>&1 || true
-    if ! retry 3 helm pull nvidian/quick-start --version 1.0.0; then
-      error_exit "Failed to download OSMO chart from authenticated NGC repo"
+    # Authenticated pull with NGC API key
+    if ! retry 3 helm fetch https://helm.ngc.nvidia.com/nvidia/osmo/charts/quick-start-1.0.0.tgz --username='$oauthtoken' --password="$NGC_API_KEY"; then
+      error_exit "Failed to download OSMO chart. Please ensure your NGC API key has permission to access the OSMO helm chart."
     fi
   else
-    # Fallback to direct URL (may require auth and fail with 401)
-    if ! retry 3 helm fetch https://helm.ngc.nvidia.com/nvidian/osmo/charts/quick-start-1.0.0.tgz; then
-      error_exit "Failed to download OSMO chart"
+    # No API key provided - try without auth (will likely fail with 401)
+    echo -e "${YELLOW}⚠️  No NGC API key provided. Required to download OSMO Helm Chart.${RESET}"
+    echo -e "${YELLOW}⚠️  Get your NGC API key at: https://ngc.nvidia.com/setup/api-key${RESET}"
+    if ! retry 3 helm fetch https://helm.ngc.nvidia.com/nvidia/osmo/charts/quick-start-1.0.0.tgz; then
+      error_exit "Failed to download OSMO chart. Please ensure your NGC API key has permissions to access the OSMO helm chart."
     fi
   fi
 fi
